@@ -1,5 +1,13 @@
 # Factory Desktop 简体中文补丁 · macOS
 
+## 直接下载
+
+**[点击下载 macOS 汉化补丁 ZIP（含完整源码和中文指南）](https://github.com/Yaci0418/factory-zh-cn-macos/releases/download/v1.0.0-macos/factory-zh-cn-macos-v1.0.0.zip)**
+
+下载后完整解压，先打开 **`先读我.txt`**。普通用户无需安装 npm 依赖，开发者请阅读包内 **`DEVELOPING.md`**。
+
+[查看发布说明与校验文件](https://github.com/Yaci0418/factory-zh-cn-macos/releases/tag/v1.0.0-macos)。当前为预览版，真实安装、恢复及界面端到端测试尚未完成。
+
 Factory Desktop 汉化补丁的社区 macOS 移植版，基于 [Chun 的上游项目](https://github.com/Chun556699/Factory-Droid-Chinese-Language-Patch)。
 
 适配目标为 **Factory Desktop 1.2.0 / macOS arm64**。本仓库不包含 Factory 应用、账号数据或原版程序备份。
@@ -8,7 +16,7 @@ Factory Desktop 汉化补丁的社区 macOS 移植版，基于 [Chun 的上游�
 
 需要 Node.js 18 或更高版本，以及已安装的 Factory Desktop。
 
-1. 下载并解压本仓库。
+1. 点击上方的 **ZIP 直接下载链接**，完整解压后阅读 `先读我.txt`。
 2. **完全退出 Factory（⌘Q）**，在独立的 macOS 终端执行命令。
 3. 安装汉化：
 
