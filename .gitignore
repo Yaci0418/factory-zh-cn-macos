@@ -1,0 +1,10 @@
+node_modules/
+translations/untranslated.json
+*.log
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+*.zh-cn-backup
+*.zh-cn-tmp
