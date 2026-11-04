@@ -79,7 +79,7 @@ const M = {
     verifyFailed: '安装后校验失败，请运行「恢复英文原版」。',
     done: (pct, t, total) => `\n汉化完成！界面文本翻译覆盖率：${pct}%（${t}/${total}）`,
     langHint: '如果界面仍是英文，请在 Factory 的「设置 → 偏好设置 → 语言」中选择「简体中文」。',
-    signatureNote: '注意：bundle 已被重新签名为 ad-hoc 签名（Team ID 不再是 SW6TL4V6Q5），本地使用不受影响。',
+    signatureNote: '注意：应用已改为 ad-hoc 签名，不再保留官方签名信任状态；部分功能或系统权限可能受影响。',
     launchPrompt: '\n是否立即启动 Factory？[Y/n]：',
     alreadyEnglish: '当前已是英文原版，无需恢复。',
     noBackupRestore: '找不到原版备份文件，无法恢复。请重新安装 Factory 桌面版。',
@@ -146,7 +146,7 @@ const M = {
     verifyFailed: 'Post-install verification failed. Please run the restore script.',
     done: (pct, t, total) => `\nDone! UI text translated: ${pct}% (${t}/${total})`,
     langHint: 'If the UI is still in English, choose 简体中文 (Simplified Chinese) under Settings -> Preferences -> Language.',
-    signatureNote: 'Note: the bundle is now ad-hoc signed (the Developer ID team is gone). This does not affect local use.',
+    signatureNote: 'Note: the bundle is now ad-hoc signed. Official signing trust is not preserved; some features or system permissions may be affected.',
     launchPrompt: '\nLaunch Factory now? [Y/n]: ',
     alreadyEnglish: 'Factory is already the original English version; nothing to restore.',
     noBackupRestore: 'Original backup files not found. Please reinstall Factory Desktop.',
@@ -187,13 +187,22 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function parseArgs(argv) {
   const opts = { command: 'install', dir: null, yes: false, launch: true, lang: null };
+  let commandSeen = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--dir') opts.dir = argv[++i];
-    else if (arg === '--lang') opts.lang = argv[++i];
+    if (arg === '--dir' || arg === '--lang') {
+      const value = argv[++i];
+      if (!value || !value.trim() || value.startsWith('-')) fail(`Missing value for ${arg}`);
+      if (arg === '--lang' && !['zh', 'en'].includes(value)) fail(`Invalid --lang: ${value} (expected zh or en)`);
+      opts[arg === '--dir' ? 'dir' : 'lang'] = value;
+    }
     else if (arg === '--yes' || arg === '-y') opts.yes = true;
     else if (arg === '--no-launch') opts.launch = false;
-    else if (!arg.startsWith('-')) opts.command = arg;
+    else if (!arg.startsWith('-')) {
+      if (commandSeen) fail(`Unexpected argument: ${arg}`);
+      opts.command = arg;
+      commandSeen = true;
+    }
     else fail(`Unknown argument: ${arg}`);
   }
   if (!['install', 'restore', 'status', 'report'].includes(opts.command)) fail(`Unknown command: ${opts.command}`);
@@ -445,6 +454,7 @@ function resignApp(appDir, m) {
       execFileSync('codesign', [...common, '--deep', ...meta, item], { stdio: 'pipe' });
     }
     execFileSync('codesign', [...common, ...meta, appDir], { stdio: 'pipe' });
+    execFileSync('codesign', ['--verify', '--deep', '--strict', appDir], { stdio: 'pipe' });
   } catch (err) {
     fail(m.resignFailed(String((err.stderr || '').toString().trim() || err.message)));
   } finally {
@@ -778,21 +788,38 @@ async function packArchive(appDir, outFile, origHeaderString, changed, m) {
 
 // ---------------------------------------------------------------- commands
 
-// Installs the new asar first and the integrity record second; a failure
-// between them leaves a consistent state and rolls the asar back to the backup.
+// Roll back to the pair present immediately before this operation, which may
+// already be patched. The original English backup is not a transaction snapshot.
 function swapIn(p, asarSource, integrityBuffer) {
-  const asarTmp = p.asar + TMP_SUFFIX;
-  const integrityTmp = p.integrityFile + TMP_SUFFIX;
-  fs.copyFileSync(asarSource, asarTmp);
-  if (integrityBuffer) fs.writeFileSync(integrityTmp, integrityBuffer);
-  fs.renameSync(asarTmp, p.asar);
-  if (!integrityBuffer) return;
+  const snapshot = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-zh-cn-swap-'));
+  const suffix = TMP_SUFFIX + '-' + crypto.randomBytes(8).toString('hex');
+  const asarTmp = p.asar + suffix;
+  const integrityTmp = p.integrityFile + suffix;
+  let replaced = false;
+  let keepSnapshot = false;
   try {
-    fs.renameSync(integrityTmp, p.integrityFile);
+    fs.copyFileSync(p.asar, path.join(snapshot, 'app.asar'));
+    if (integrityBuffer) fs.copyFileSync(p.integrityFile, path.join(snapshot, 'integrity'));
+    fs.copyFileSync(asarSource, asarTmp);
+    if (integrityBuffer) fs.writeFileSync(integrityTmp, integrityBuffer);
+    fs.renameSync(asarTmp, p.asar);
+    replaced = true;
+    if (integrityBuffer) fs.renameSync(integrityTmp, p.integrityFile);
   } catch (err) {
-    fs.copyFileSync(p.asarBackup, p.asar);
-    fs.rmSync(integrityTmp, { force: true });
+    if (replaced) {
+      try {
+        fs.copyFileSync(path.join(snapshot, 'app.asar'), p.asar);
+        if (integrityBuffer) fs.copyFileSync(path.join(snapshot, 'integrity'), p.integrityFile);
+      } catch (rollbackError) {
+        keepSnapshot = true;
+        throw new Error(`${err.message}\nRollback failed: ${rollbackError.message}\nRecovery files: ${snapshot}`, { cause: err });
+      }
+    }
     throw err;
+  } finally {
+    fs.rmSync(asarTmp, { force: true });
+    fs.rmSync(integrityTmp, { force: true });
+    if (!keepSnapshot) fs.rmSync(snapshot, { recursive: true, force: true });
   }
 }
 
@@ -887,16 +914,41 @@ async function restore(p, opts, m) {
   await ensureClosed(p.appDir, opts, m);
   log(m.restoring);
   const expectedHash = headerHash(p.asarBackup);
-  swapIn(p, p.asarBackup, fs.readFileSync(p.integrityBackup));
-  // Remove the backups before re-signing: the new signature seals the files
-  // that are actually present in the bundle.
-  fs.rmSync(p.asarBackup, { force: true });
-  fs.rmSync(p.integrityBackup, { force: true });
+  // Keep a copy outside the signed bundle until signing and verification pass.
+  // On failure, put the backups back so a subsequent restore retries signing.
+  const recovery = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-zh-cn-restore-'));
+  let backupsRemoved = false;
+  let keepRecovery = false;
   try {
-    fs.rmdirSync(path.dirname(p.asarBackup));
-  } catch {}
-  resignApp(p.appDir, m);
-  if (headerHash(p.asar) !== expectedHash) fail(m.restoreVerifyFailed);
+    fs.copyFileSync(p.asarBackup, path.join(recovery, 'app.asar'));
+    fs.copyFileSync(p.integrityBackup, path.join(recovery, 'integrity'));
+    swapIn(p, p.asarBackup, fs.readFileSync(p.integrityBackup));
+    backupsRemoved = true;
+    fs.rmSync(p.asarBackup, { force: true });
+    fs.rmSync(p.integrityBackup, { force: true });
+    // Only macOS puts backups in a dedicated directory; never remove the
+    // Windows resources directory, even if it happens to be empty.
+    if (IS_MAC) {
+      try { fs.rmdirSync(path.dirname(p.asarBackup)); } catch {}
+    }
+    resignApp(p.appDir, m);
+    if (integrityInfo(p.asar, p.integrityFile, m).hash !== expectedHash) fail(m.restoreVerifyFailed);
+  } catch (err) {
+    if (backupsRemoved) {
+      try {
+        fs.mkdirSync(path.dirname(p.asarBackup), { recursive: true });
+        fs.mkdirSync(path.dirname(p.integrityBackup), { recursive: true });
+        fs.copyFileSync(path.join(recovery, 'app.asar'), p.asarBackup);
+        fs.copyFileSync(path.join(recovery, 'integrity'), p.integrityBackup);
+      } catch (backupError) {
+        keepRecovery = true;
+        throw new Error(`${err.message}\nCannot reinstate backups: ${backupError.message}\nRecovery files: ${recovery}`, { cause: err });
+      }
+    }
+    throw err;
+  } finally {
+    if (!keepRecovery) fs.rmSync(recovery, { recursive: true, force: true });
+  }
   log(m.restored);
 }
 
@@ -957,7 +1009,9 @@ async function main() {
   else await report(p, m);
 }
 
-main().catch((err) => {
+module.exports = { parseArgs, swapIn, restore };
+
+if (require.main === module) main().catch((err) => {
   let lang = 'en';
   try {
     lang = detectLang(parseArgs(process.argv.slice(2)).lang);

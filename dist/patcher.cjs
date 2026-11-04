@@ -9133,7 +9133,7 @@ var M = {
     done: (pct, t, total) => `
 \u6C49\u5316\u5B8C\u6210\uFF01\u754C\u9762\u6587\u672C\u7FFB\u8BD1\u8986\u76D6\u7387\uFF1A${pct}%\uFF08${t}/${total}\uFF09`,
     langHint: "\u5982\u679C\u754C\u9762\u4ECD\u662F\u82F1\u6587\uFF0C\u8BF7\u5728 Factory \u7684\u300C\u8BBE\u7F6E \u2192 \u504F\u597D\u8BBE\u7F6E \u2192 \u8BED\u8A00\u300D\u4E2D\u9009\u62E9\u300C\u7B80\u4F53\u4E2D\u6587\u300D\u3002",
-    signatureNote: "\u6CE8\u610F\uFF1Abundle \u5DF2\u88AB\u91CD\u65B0\u7B7E\u540D\u4E3A ad-hoc \u7B7E\u540D\uFF08Team ID \u4E0D\u518D\u662F SW6TL4V6Q5\uFF09\uFF0C\u672C\u5730\u4F7F\u7528\u4E0D\u53D7\u5F71\u54CD\u3002",
+    signatureNote: "\u6CE8\u610F\uFF1A\u5E94\u7528\u5DF2\u6539\u4E3A ad-hoc \u7B7E\u540D\uFF0C\u4E0D\u518D\u4FDD\u7559\u5B98\u65B9\u7B7E\u540D\u4FE1\u4EFB\u72B6\u6001\uFF1B\u90E8\u5206\u529F\u80FD\u6216\u7CFB\u7EDF\u6743\u9650\u53EF\u80FD\u53D7\u5F71\u54CD\u3002",
     launchPrompt: "\n\u662F\u5426\u7ACB\u5373\u542F\u52A8 Factory\uFF1F[Y/n]\uFF1A",
     alreadyEnglish: "\u5F53\u524D\u5DF2\u662F\u82F1\u6587\u539F\u7248\uFF0C\u65E0\u9700\u6062\u590D\u3002",
     noBackupRestore: "\u627E\u4E0D\u5230\u539F\u7248\u5907\u4EFD\u6587\u4EF6\uFF0C\u65E0\u6CD5\u6062\u590D\u3002\u8BF7\u91CD\u65B0\u5B89\u88C5 Factory \u684C\u9762\u7248\u3002",
@@ -9203,7 +9203,7 @@ The app may not start; please reinstall Factory.`,
     done: (pct, t, total) => `
 Done! UI text translated: ${pct}% (${t}/${total})`,
     langHint: "If the UI is still in English, choose \u7B80\u4F53\u4E2D\u6587 (Simplified Chinese) under Settings -> Preferences -> Language.",
-    signatureNote: "Note: the bundle is now ad-hoc signed (the Developer ID team is gone). This does not affect local use.",
+    signatureNote: "Note: the bundle is now ad-hoc signed. Official signing trust is not preserved; some features or system permissions may be affected.",
     launchPrompt: "\nLaunch Factory now? [Y/n]: ",
     alreadyEnglish: "Factory is already the original English version; nothing to restore.",
     noBackupRestore: "Original backup files not found. Please reinstall Factory Desktop.",
@@ -9241,14 +9241,21 @@ var sha256 = (data) => crypto.createHash("sha256").update(data).digest("hex");
 var sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function parseArgs(argv) {
   const opts = { command: "install", dir: null, yes: false, launch: true, lang: null };
+  let commandSeen = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--dir") opts.dir = argv[++i];
-    else if (arg === "--lang") opts.lang = argv[++i];
-    else if (arg === "--yes" || arg === "-y") opts.yes = true;
+    if (arg === "--dir" || arg === "--lang") {
+      const value = argv[++i];
+      if (!value || !value.trim() || value.startsWith("-")) fail(`Missing value for ${arg}`);
+      if (arg === "--lang" && !["zh", "en"].includes(value)) fail(`Invalid --lang: ${value} (expected zh or en)`);
+      opts[arg === "--dir" ? "dir" : "lang"] = value;
+    } else if (arg === "--yes" || arg === "-y") opts.yes = true;
     else if (arg === "--no-launch") opts.launch = false;
-    else if (!arg.startsWith("-")) opts.command = arg;
-    else fail(`Unknown argument: ${arg}`);
+    else if (!arg.startsWith("-")) {
+      if (commandSeen) fail(`Unexpected argument: ${arg}`);
+      opts.command = arg;
+      commandSeen = true;
+    } else fail(`Unknown argument: ${arg}`);
   }
   if (!["install", "restore", "status", "report"].includes(opts.command)) fail(`Unknown command: ${opts.command}`);
   return opts;
@@ -9449,6 +9456,7 @@ function resignApp(appDir, m) {
       execFileSync("codesign", [...common, "--deep", ...meta, item], { stdio: "pipe" });
     }
     execFileSync("codesign", [...common, ...meta, appDir], { stdio: "pipe" });
+    execFileSync("codesign", ["--verify", "--deep", "--strict", appDir], { stdio: "pipe" });
   } catch (err) {
     fail(m.resignFailed(String((err.stderr || "").toString().trim() || err.message)));
   } finally {
@@ -9704,18 +9712,37 @@ async function packArchive(appDir, outFile, origHeaderString, changed, m) {
   return headerHash(outFile);
 }
 function swapIn(p, asarSource, integrityBuffer) {
-  const asarTmp = p.asar + TMP_SUFFIX;
-  const integrityTmp = p.integrityFile + TMP_SUFFIX;
-  fs.copyFileSync(asarSource, asarTmp);
-  if (integrityBuffer) fs.writeFileSync(integrityTmp, integrityBuffer);
-  fs.renameSync(asarTmp, p.asar);
-  if (!integrityBuffer) return;
+  const snapshot = fs.mkdtempSync(path.join(os.tmpdir(), "factory-zh-cn-swap-"));
+  const suffix = TMP_SUFFIX + "-" + crypto.randomBytes(8).toString("hex");
+  const asarTmp = p.asar + suffix;
+  const integrityTmp = p.integrityFile + suffix;
+  let replaced = false;
+  let keepSnapshot = false;
   try {
-    fs.renameSync(integrityTmp, p.integrityFile);
+    fs.copyFileSync(p.asar, path.join(snapshot, "app.asar"));
+    if (integrityBuffer) fs.copyFileSync(p.integrityFile, path.join(snapshot, "integrity"));
+    fs.copyFileSync(asarSource, asarTmp);
+    if (integrityBuffer) fs.writeFileSync(integrityTmp, integrityBuffer);
+    fs.renameSync(asarTmp, p.asar);
+    replaced = true;
+    if (integrityBuffer) fs.renameSync(integrityTmp, p.integrityFile);
   } catch (err) {
-    fs.copyFileSync(p.asarBackup, p.asar);
-    fs.rmSync(integrityTmp, { force: true });
+    if (replaced) {
+      try {
+        fs.copyFileSync(path.join(snapshot, "app.asar"), p.asar);
+        if (integrityBuffer) fs.copyFileSync(path.join(snapshot, "integrity"), p.integrityFile);
+      } catch (rollbackError) {
+        keepSnapshot = true;
+        throw new Error(`${err.message}
+Rollback failed: ${rollbackError.message}
+Recovery files: ${snapshot}`, { cause: err });
+      }
+    }
     throw err;
+  } finally {
+    fs.rmSync(asarTmp, { force: true });
+    fs.rmSync(integrityTmp, { force: true });
+    if (!keepSnapshot) fs.rmSync(snapshot, { recursive: true, force: true });
   }
 }
 async function prepareBackups(p, m) {
@@ -9802,15 +9829,42 @@ async function restore(p, opts, m) {
   await ensureClosed(p.appDir, opts, m);
   log(m.restoring);
   const expectedHash = headerHash(p.asarBackup);
-  swapIn(p, p.asarBackup, fs.readFileSync(p.integrityBackup));
-  fs.rmSync(p.asarBackup, { force: true });
-  fs.rmSync(p.integrityBackup, { force: true });
+  const recovery = fs.mkdtempSync(path.join(os.tmpdir(), "factory-zh-cn-restore-"));
+  let backupsRemoved = false;
+  let keepRecovery = false;
   try {
-    fs.rmdirSync(path.dirname(p.asarBackup));
-  } catch {
+    fs.copyFileSync(p.asarBackup, path.join(recovery, "app.asar"));
+    fs.copyFileSync(p.integrityBackup, path.join(recovery, "integrity"));
+    swapIn(p, p.asarBackup, fs.readFileSync(p.integrityBackup));
+    backupsRemoved = true;
+    fs.rmSync(p.asarBackup, { force: true });
+    fs.rmSync(p.integrityBackup, { force: true });
+    if (IS_MAC) {
+      try {
+        fs.rmdirSync(path.dirname(p.asarBackup));
+      } catch {
+      }
+    }
+    resignApp(p.appDir, m);
+    if (integrityInfo(p.asar, p.integrityFile, m).hash !== expectedHash) fail(m.restoreVerifyFailed);
+  } catch (err) {
+    if (backupsRemoved) {
+      try {
+        fs.mkdirSync(path.dirname(p.asarBackup), { recursive: true });
+        fs.mkdirSync(path.dirname(p.integrityBackup), { recursive: true });
+        fs.copyFileSync(path.join(recovery, "app.asar"), p.asarBackup);
+        fs.copyFileSync(path.join(recovery, "integrity"), p.integrityBackup);
+      } catch (backupError) {
+        keepRecovery = true;
+        throw new Error(`${err.message}
+Cannot reinstate backups: ${backupError.message}
+Recovery files: ${recovery}`, { cause: err });
+      }
+    }
+    throw err;
+  } finally {
+    if (!keepRecovery) fs.rmSync(recovery, { recursive: true, force: true });
   }
-  resignApp(p.appDir, m);
-  if (headerHash(p.asar) !== expectedHash) fail(m.restoreVerifyFailed);
   log(m.restored);
 }
 function appVersion(appDir) {
@@ -9862,7 +9916,8 @@ async function main() {
   else if (opts.command === "status") status(p, m);
   else await report(p, m);
 }
-main().catch((err) => {
+module.exports = { parseArgs, swapIn, restore };
+if (require.main === module) main().catch((err) => {
   let lang = "en";
   try {
     lang = detectLang(parseArgs(process.argv.slice(2)).lang);
